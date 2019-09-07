@@ -1,0 +1,2532 @@
+;; GROUP # 
+
+;;============================================================================
+;; File: software.psm
+;; This is the PicoBlaze example game program for EE178 Lab #8.
+;; No guarantee this is bug-free but it is a playable example.
+;;============================================================================
+
+;;============================================================================
+;; Ports and related constants.
+;;============================================================================
+
+CONSTANT stax            , 00 ; port for 8-bit start-x
+CONSTANT stay            , 01 ; port for 8-bit start-y
+CONSTANT endx            , 02 ; port for 8-bit end-x
+CONSTANT endy            , 03 ; port for 8-bit end-y
+CONSTANT busy            , 04 ; port for 8-bit busy
+CONSTANT beam            , 05 ; port for 8-bit beam
+CONSTANT mode            , 06 ; port for 8-bit mode
+CONSTANT prng            , 07 ; port for 8-bit prng
+CONSTANT leds_lo         , 08 ; port for 8-bit led data out
+CONSTANT leds_hi         , 09 ; port for 8-bit led data out
+CONSTANT qssd_lo         , 0a ; port for 8-bit qssd data out
+CONSTANT qssd_hi         , 0b ; port for 8-bit qssd data out
+CONSTANT qssd_dp         , 0c ; port for 8-bit qssd data out
+CONSTANT switches_lo     , 0d ; port for 8-bit switch input
+CONSTANT switches_hi     , 0e ; port for 8-bit switch input
+CONSTANT buttons         , 0f ; port for 8-bit button input
+
+CONSTANT busy_go         , 01 ; go command and busy status
+
+CONSTANT beam_hi         , 0f ; beam high intensity
+CONSTANT beam_md         , 07 ; beam med intensity
+CONSTANT beam_lo         , 03 ; beam low intensity
+
+CONSTANT mode_hld        , 00 ; mode hold framebuffer
+CONSTANT mode_clr        , 01 ; mode clear framebuffer
+CONSTANT mode_lin        , 02 ; mode linear decay
+CONSTANT mode_exp        , 03 ; mode exponential decay
+
+CONSTANT buttons_ct      , 10 ; center
+CONSTANT buttons_up      , 08 ; up
+CONSTANT buttons_dn      , 04 ; down
+CONSTANT buttons_lf      , 02 ; left
+CONSTANT buttons_rt      , 01 ; right
+
+;;============================================================================
+;; Game state declarations.
+;;============================================================================
+
+NAMEREG s0, gs_major
+CONSTANT gs_major_attrone, 00 	; state assignment
+CONSTANT gs_major_attrtwo, 01 	; state assignment
+CONSTANT gs_major_playing, 02 	; state assignment
+CONSTANT gs_major_gameend, 03 	; state assignment
+
+NAMEREG s1, gs_minor
+CONSTANT gs_minor_begins , 00 	; counter initialize
+CONSTANT gs_minor_twosec , 78 	; frame count about 2.0 secs
+CONSTANT gs_minor_onesec , 3c 	; frame count about 1.0 secs
+CONSTANT gs_minor_getrdy , 1e 	; frame count about 0.5 secs
+
+
+
+NAMEREG s2, gs_cursx
+NAMEREG s3, gs_cursy
+NAMEREG s4, bullet		; bullet's x and y 
+
+;;=========== allocate 0x00 to 0x0F for bullet =============
+
+NAMEREG s5, bullet_d	
+	
+
+;;=========== allocate 0x10 to 0x1F for bullet_d =============
+
+NAMEREG s6, missile		; missile's x and y
+
+
+;;====== allocate 0x20 to 0x48 for miss_stax, miss_stay ========
+;;================= and miss_endx, miss_endy ===================
+
+
+;;=========== allocate 0x80 to 0x93 for missile_d =============
+
+
+;;=========== allocate 0x94 to 0x9D for missile_en =============
+
+
+;;======= allocate 0xA0 to 0xAD for missile direction =========
+
+
+;;=========== allocate 0x5f for timer during game =============
+
+NAMEREG s8, timer		
+
+;;=========== allocate 0x60 to 0x6B for bases =============
+;;=========== base1 = 60
+;;=========== base1_x = 61
+;;=========== base1_y = 62
+;;=========== base1 = 63
+;;=========== base1_x = 64
+;;=========== base1_y = 65
+;;=========== base1 = 66
+;;=========== base1_x = 67
+;;=========== base1_y = 68
+;;=========== base1 = 69
+;;=========== base1_x = 6a
+;;=========== base1_y = 6b
+
+
+;;=========== allocate 0x70 to 0x73 for canon =============
+
+NAMEREG s7, canon		
+
+CONSTANT gs_speed , 03
+CONSTANT gs_curs_dim , 03 ; length of the cursor's optics 
+CONSTANT gs_curs_speedx , 02 ; cursor's speed (pixels per frame)
+CONSTANT gs_curs_speedy , 03 ; cursor's speed (pixels per frame)
+CONSTANT centerscreen , 7f
+CONSTANT gs_curs_boundary_lower , 04
+CONSTANT gs_curs_boundary_upper , fb
+CONSTANT gs_base1_x , 34
+CONSTANT gs_base2_x , 66
+CONSTANT gs_base3_x , 98
+CONSTANT gs_base4_x , ca
+
+
+;;============================================================================
+;; Global variables.
+;;============================================================================
+
+NAMEREG s9, xpos              ; for drawing routines
+NAMEREG sA, ypos              ; for drawing routines
+NAMEREG sB, swlsamp           ; switch lo sample
+NAMEREG sC, swhsamp           ; switch hi sample
+NAMEREG sD, btnsamp           ; button sample
+NAMEREG sE, loopvar           ; for loops
+NAMEREG sF, scratch           ; for scratch
+
+;;============================================================================
+;; Other stuff.
+;;============================================================================
+
+CONSTANT minusone        , ff ; minusone
+CONSTANT minusmax        , 80 ; minus 128
+CONSTANT plusmax         , 7f ; plus 127
+CONSTANT zero            , 00 ; zero
+CONSTANT one             , 01 ; one
+CONSTANT two             , 02 ; one
+
+;;============================================================================
+;; Boot.
+;; This performs one-time initialization of the hardware and the game state.
+;;============================================================================
+
+         boot: CALL hw_init                        ; initial hardware setup
+               CALL gs_init                        ; set initial game state
+               ENABLE INTERRUPT                    ; enable vblnk interrupt
+
+;;============================================================================
+;; Main.
+;; This is an empty loop, does nothing, waiting for interrupts to occur.
+;;============================================================================
+
+         main: JUMP main                           ; empty loop, does nothing
+
+;;============================================================================
+;; Interrupt.
+;; This is the main game logic.  At each interrupt, the procedure is to read
+;; the user input, calculate the next game state, and then draw the game
+;; state on the display.
+;;============================================================================
+
+          isr: CALL user_input                     ; get the user input
+               CALL calc_next_gs                   ; calculate next state
+               CALL draw_gs                        ; draw the state
+               RETURNI ENABLE                      ; return with enable
+
+;;============================================================================
+;; Subroutine: hw_init
+;; This puts the hardware into a known, initial state.  This includes a wait
+;; to make sure the line drawing harware is idle (a wait loop which is also
+;; called from other routines, as a subroutine).
+;;============================================================================
+
+      hw_init: LOAD scratch, zero                  ; going to use lot of zero
+               OUTPUT scratch, leds_lo             ; turn off lo leds
+               OUTPUT scratch, leds_hi             ; turn off hi leds
+               OUTPUT scratch, qssd_lo             ; zeroize qssd lo
+               OUTPUT scratch, qssd_hi             ; zeroize qssd hi
+               OUTPUT scratch, qssd_dp             ; turn off qssd dots
+               LOAD scratch, mode_exp              ; load desired mode
+               OUTPUT scratch, mode                ; program the framebuffer
+               LOAD scratch, beam_hi               ; load desired beam
+               OUTPUT scratch, beam                ; program the framebuffer
+ hw_init_wait: INPUT scratch, busy                 ; get framebuffer busy
+               COMPARE scratch, busy_go            ; check framebuffer busy
+               JUMP Z, hw_init_wait                ; back to wait if busy
+               RETURN                              ; return
+
+;;============================================================================
+;; Subroutine: gs_init
+;; This puts the game into a known, initial state.  I've assigned all of the
+;; game state to a known value -- although some of these assignments do not
+;; really matter based on design of the game state machine.
+;;============================================================================
+
+      gs_init: LOAD gs_major, gs_major_attrone     ; start in attract mdoe
+               LOAD gs_minor, gs_minor_begins	; start with counter zero
+	       LOAD gs_cursx, zero
+	       LOAD gs_cursy, zero
+	       LOAD timer, zero
+	       LOAD bullet, zero
+ 	       STORE bullet, 00			; 0x00 and 0x01 for bulletx 		
+ 	       STORE bullet, 01 		; and bullety
+ 	       STORE bullet, 02	                ; 0x02 and 0x03 for topright 
+ 	       STORE bullet, 03			
+	       STORE bullet, 04			; 0x05 and 0x06 for botleft
+	       STORE bullet, 05	
+	       STORE bullet, 06			; 0x06-0x
+ 	       STORE bullet, 07
+ 	       STORE bullet, 08
+ 	       STORE bullet, 09
+ 	       STORE bullet, 0a
+ 	       STORE bullet, 0b
+ 	       STORE bullet, 0e			; timer for bullets toggle
+ 	       STORE bullet, 0d			; timer for bullets 
+ 	       STORE bullet, 10			
+ 	       STORE bullet, 11
+	       STORE bullet, 1f	
+	       LOAD bullet, one
+ 	       STORE bullet, 0f			; number of bullets 		
+	
+	       LOAD missile, zero
+	       STORE missile, 20 		; set for stax, stay, endx, endy
+	       STORE missile, 21  		; for the missile
+	       STORE missile, 22
+	       STORE missile, 23 
+	       STORE missile, 24			
+	       STORE missile, 25 
+	       STORE missile, 26
+	       STORE missile, 27 	       
+	       STORE missile, 28	       
+	       STORE missile, 29 
+	       STORE missile, 2a  
+	       STORE missile, 2b
+	       STORE missile, 2c 
+	       STORE missile, 2d			
+	       STORE missile, 2e 
+	       STORE missile, 2f
+	       STORE missile, 30 
+	       STORE missile, 31  
+	       STORE missile, 32
+	       STORE missile, 33 
+	       STORE missile, 34			
+	       STORE missile, 35 
+	       STORE missile, 36
+	       STORE missile, 37 	       
+	       STORE missile, 38	       
+	       STORE missile, 39 
+	       STORE missile, 3a  
+	       STORE missile, 3b
+	       STORE missile, 3c 
+	       STORE missile, 3d			
+	       STORE missile, 3e 
+	       STORE missile, 3f
+	       STORE missile, 40 
+	       STORE missile, 41  
+	       STORE missile, 42
+	       STORE missile, 43 
+	       STORE missile, 44			
+	       STORE missile, 45 
+	       STORE missile, 46
+	       STORE missile, 47 	       
+	       STORE missile, 48	       
+	       STORE missile, 49 
+	       STORE missile, 4a  
+	       STORE missile, 4b
+	       STORE missile, 4c 
+	       STORE missile, 4d			
+	       STORE missile, 4e 
+	       STORE missile, 4f	       
+	       
+	       STORE missile, 80 		; set for missile_d
+	       STORE missile, 81  
+	       STORE missile, 82
+	       STORE missile, 83 
+	       STORE missile, 84			
+	       STORE missile, 85 
+	       STORE missile, 86
+	       STORE missile, 87 	       
+	       STORE missile, 88	       
+	       STORE missile, 89 
+	       STORE missile, 8a  
+	       STORE missile, 8b
+	       STORE missile, 8c 
+	       STORE missile, 8d			
+	       STORE missile, 8e 
+	       STORE missile, 8f	       
+	       STORE missile, 90 		
+	       STORE missile, 91  
+	       STORE missile, 92
+	       STORE missile, 93	       
+	       
+	       LOAD scratch, one 
+	       STORE scratch, 94		; enable missile 			
+	       STORE scratch, 95 
+	       STORE scratch, 96 
+	       STORE scratch, 97  
+	       STORE scratch, 98
+	       STORE scratch, 99 
+	       STORE scratch, 9a			
+	       STORE scratch, 9b 
+	       STORE scratch, 9c 
+	       STORE scratch, 9d 
+
+	       LOAD scratch, one
+	       STORE scratch, 60			; set all 4 base to one
+	       STORE scratch, 63 
+	       STORE scratch, 66 
+	       STORE scratch, 69 
+	
+	       LOAD scratch, zero
+	       STORE scratch, 5f
+	       STORE scratch, df		; testing reg
+	       STORE scratch, cf		; testing reg
+               RETURN                           ; return
+
+;;============================================================================
+;; Subroutine: user_input
+;; This samples the user inputs required for this game (which happens to be
+;; only the buttons, but this could is extended to the switches as well).
+;; This subroutine calls an example of how to use the RAM scratchpad, by
+;; implementing access of a 256x8 array using switches, button, and qssd.
+;; The call to the ram_example routine (and ram_example routine itself)
+;; can be entirely removed as it is not needed in this game.
+;;============================================================================
+
+   user_input: INPUT btnsamp, buttons              ; sample button hardware
+               INPUT swlsamp, switches_lo          ; sample switch lo hardware
+               INPUT swhsamp, switches_hi          ; sample switch hi hardware
+               ;CALL ram_example                    ; do the ram example
+               RETURN                              ; return
+
+  ;ram_example: OUTPUT swhsamp, qssd_hi             ; display ram address
+               ;FETCH scratch, (swhsamp)            ; read the ram at addr
+               ;OUTPUT scratch, qssd_lo             ; display data from ram
+               ;TEST btnsamp, buttons_dn            ; does user want to write
+               ;RETURN Z                            ; if not then return
+               ;STORE swlsamp, (swhsamp)            ; write the ram at addr
+               ;RETURN                              ; return
+
+;;============================================================================
+;; Subroutine: calc_next_gs
+;; This logic calculates the next state of the game, given the sampled user
+;; inputs and the current state of the game.
+;;============================================================================
+
+ calc_next_gs: COMPARE gs_major, gs_major_attrone  ; are we in attrone?
+               JUMP Z, calc_attrone                ; do ns calc for attrone
+               COMPARE gs_major, gs_major_attrtwo  ; are we in attrtwo?
+               JUMP Z, calc_attrtwo                ; do ns calc for attrtwo
+               COMPARE gs_major, gs_major_playing  ; are we in playing?
+               JUMP Z, calc_playing                ; do ns calc for playing
+               COMPARE gs_major, gs_major_gameend  ; are we in gameend?
+               JUMP Z, calc_gameend                ; do ns calc for gameend
+               RETURN                              ; return
+
+ calc_attrone: TEST btnsamp, buttons_ct
+               JUMP NZ, goto_playing
+               COMPARE gs_minor, gs_minor_twosec
+               JUMP Z, goto_attrtwo
+               ADD gs_minor, one
+               RETURN
+
+ calc_attrtwo: TEST btnsamp, buttons_ct
+               JUMP NZ, goto_playing
+               COMPARE gs_minor, gs_minor_onesec
+               JUMP Z, goto_attrone
+               ADD gs_minor, one
+               RETURN
+
+ calc_playing: CALL upd_cursx
+	       CALL upd_cursy
+	       ;CALL draw_game_rdy
+	       COMPARE gs_minor, gs_minor_getrdy
+	       JUMP NC, goplay
+	       ADD gs_minor, one
+	       RETURN
+
+ calc_gameend: COMPARE gs_minor, gs_minor_onesec
+               JUMP Z, goto_attrone
+               ADD gs_minor, one
+               RETURN
+
+ goto_attrone: LOAD gs_major, gs_major_attrone
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+ goto_attrtwo: LOAD gs_major, gs_major_attrtwo
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+ goto_playing: LOAD gs_cursx, centerscreen
+	       LOAD gs_cursy, centerscreen
+	       LOAD gs_major, gs_major_playing
+               LOAD gs_minor, gs_minor_begins
+	       LOAD scratch, one
+	       STORE scratch, 00
+	       STORE scratch, 01
+	       STORE scratch, 02
+	       STORE scratch, 24
+	       STORE scratch, 26
+	       STORE scratch, 28
+	       STORE scratch, 2a
+	       STORE scratch, 2c
+	       STORE scratch, 2e
+	       RETURN
+
+   gen_random: INPUT missile, prng		; random numbers from 0x00 - 0xFE
+	       RETURN
+
+ gen_random64: INPUT missile, prng		
+	       SR0 missile
+	       SR0 missile
+               RETURN
+
+
+  gen_random4: INPUT missile, prng
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+               RETURN
+
+
+ gen_random1: INPUT missile, prng
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+	       SR0 missile
+               RETURN
+
+
+
+ goto_gameend: LOAD gs_major, gs_major_gameend
+               LOAD gs_minor, gs_minor_begins
+               RETURN
+
+
+;;======================= MAIN GAME BLOCK ===============================
+
+       goplay: CALL upd_base
+	       CALL upd_canon
+	       CALL upd_bullets		
+	       CALL upd_missile
+	       ;CALL upd_bullet_missile		; #################
+	       ;CALL upd_missile_base
+	       ADD timer, one
+	       COMPARE timer, gs_minor_onesec
+	       CALL Z, reset_timer
+ 	       FETCH scratch, 60 
+ 	       COMPARE scratch, zero
+ 	       FETCH scratch, 63
+ 	       COMPARECY scratch, zero
+ 	       FETCH scratch, 66
+ 	       COMPARECY scratch, zero
+ 	       FETCH scratch, 69
+ 	       COMPARECY scratch, zero
+	       JUMP Z, goto_gameend
+	       RETURN
+
+  reset_timer: LOAD timer, zero 
+   
+
+;;========================= CURSOR BLOCK =================================
+
+
+   upd_cursx : LOAD scratch, zero
+               TEST btnsamp, buttons_lf
+               SUBCY scratch, zero
+               TEST btnsamp, buttons_rt
+               ADDCY scratch, zero
+               COMPARE scratch, minusone
+               CALL Z, upd_curs_lt
+               COMPARE scratch, one
+               CALL Z, upd_curs_rt
+	       RETURN
+
+   upd_cursy : LOAD scratch, zero
+               TEST btnsamp, buttons_up
+               SUBCY scratch, zero
+               TEST btnsamp, buttons_dn
+               ADDCY scratch, zero
+               COMPARE scratch, minusone
+               CALL Z, upd_curs_ut
+               COMPARE scratch, one
+               CALL Z, upd_curs_dt
+	       RETURN
+
+upd_curs_lt:   LOAD scratch, gs_curs_boundary_lower
+	       ADD scratch, one
+	       COMPARE gs_cursx, scratch
+	       RETURN C
+	       SUB gs_cursx, gs_curs_speedx 
+	       RETURN
+
+upd_curs_rt:   LOAD scratch, gs_curs_boundary_upper
+	       COMPARE gs_cursx, scratch
+               RETURN NC
+	       ADD gs_cursx, gs_curs_speedx
+	       RETURN
+				
+upd_curs_ut:   LOAD scratch, gs_curs_boundary_lower
+	       ADD scratch, two
+	       COMPARE gs_cursy, scratch
+               RETURN C
+	       SUB gs_cursy, gs_curs_speedy
+	       RETURN
+
+upd_curs_dt:   LOAD scratch, gs_curs_boundary_upper
+	       SUB scratch, one	
+	       COMPARE gs_cursy, scratch
+               RETURN NC
+	       ADD gs_cursy, gs_curs_speedy
+	       RETURN
+
+;;========================== BASE BLOCK ==================================
+
+     upd_base: FETCH scratch, 60
+	       COMPARE scratch, one
+	       CALL Z, base1_setup
+     	       FETCH scratch, 63
+	       COMPARE scratch, one
+	       CALL Z, base2_setup	       
+     	       FETCH scratch, 66
+	       COMPARE scratch, one
+	       CALL Z, base3_setup	       
+     	       FETCH scratch, 69
+	       COMPARE scratch, one
+	       CALL Z, base4_setup	       
+	       RETURN
+
+  base1_setup: LOAD scratch, gs_base1_x
+	       STORE scratch, 61
+	       LOAD scratch, minusone
+	       STORE scratch, 62
+	       RETURN
+
+  base2_setup: LOAD scratch, gs_base2_x
+	       STORE scratch, 64
+	       LOAD scratch, minusone
+	       STORE scratch, 65
+	       RETURN
+
+  base3_setup: LOAD scratch, gs_base3_x
+	       STORE scratch, 67
+	       LOAD scratch, minusone
+	       STORE scratch, 68
+	       RETURN
+
+  base4_setup: LOAD scratch, gs_base4_x
+	       STORE scratch, 6a
+	       LOAD scratch, minusone
+	       STORE scratch, 6b
+	       RETURN
+
+;;========================= CANON BLOCK =================================
+
+    upd_canon: COMPARE gs_cursy, centerscreen
+	       CALL C, bound_top
+	       CALL NC, bound_bot
+               RETURN
+
+    bound_top: LOAD scratch, centerscreen
+	       COMPARE scratch, gs_cursy
+	       COMPARECY gs_cursx, centerscreen
+	       CALL C, draw_canon_1
+	       CALL NC, draw_canon_2
+	       RETURN
+
+    bound_bot: COMPARE gs_cursy, centerscreen
+	       COMPARECY gs_cursx, 4b
+	       JUMP C, draw_canon_3
+	       CALL NC, check_bot_midright
+	       RETURN
+	
+check_bot_midright: LOAD canon, b3
+	       COMPARE scratch, gs_cursy
+	       COMPARECY canon, gs_cursx
+	       JUMP NC, draw_canon_4
+	       CALL draw_canon_5
+       return: LOAD canon, b3
+	       RETURN
+
+
+
+;;======================== BULLET BLOCK ================================
+
+  upd_bullets: FETCH bullet, 0f			; check # of bullets
+               COMPARE bullet, 01
+               JUMP Z, check_btn
+               FETCH scratch, 0d		; timer for bullet reload
+               ADD scratch, one
+               STORE scratch, 0d
+	       COMPARE scratch, 3c		; if its 1 sec, reload bullet
+	       CALL Z, upd_bullet
+    check_btn: FETCH scratch, 0f
+	       COMPARE scratch, one
+	       CALL Z, reset_exp
+	       COMPARE timer, 0a
+	       CALL Z, upd_expl
+	       COMPARE timer, 14
+	       CALL Z, upd_expl
+	       COMPARE timer, 1e
+	       CALL Z, upd_expl
+	       COMPARE timer, 28
+	       CALL Z, upd_expl
+	       COMPARE timer, 32
+	       CALL Z, upd_expl
+	       COMPARE timer, zero
+	       CALL Z, upd_expl
+	       FETCH bullet, 10
+	       COMPARE btnsamp, bullet		; check if delay button
+	       JUMP NZ, cond_2			; and btnsamp are different
+         exit: RETURN
+
+   upd_bullet: FETCH scratch, 0f		; inc # of bullets
+	       ADD scratch, one
+	       STORE scratch, 0f
+	       LOAD scratch, zero
+	       STORE scratch, 0d
+	       RETURN
+
+       cond_2: COMPARE btnsamp, buttons_ct
+	       JUMP Z, check_bullets
+	       JUMP exit
+	       RETURN
+
+
+     upd_expl: FETCH scratch, 0f
+	       COMPARE scratch, one
+	       JUMP Z, exit
+	       LOAD scratch, gs_cursx
+	       ADD scratch, 08
+	       STORE scratch, 02		; topright xposition
+	       LOAD scratch, gs_cursy
+	       SUB scratch, 0a
+	       STORE scratch, 03		; topright yposition
+	       LOAD scratch, gs_cursx
+	       SUB scratch, 08
+	       STORE scratch, 04		; botleft xposition
+	       LOAD scratch, gs_cursy
+	       ADD scratch, 0a
+	       STORE scratch, 05		; botleft yposition
+	       FETCH scratch, 1f
+	       COMPARE scratch, one
+	       CALL Z, inc_blt_exp1
+	       FETCH scratch, 1f
+	       COMPARE scratch, 02
+	       CALL Z, inc_blt_exp2
+	       FETCH scratch, 1f
+	       COMPARE scratch, 03
+	       CALL Z, inc_blt_exp3
+	       FETCH scratch, 1f
+	       COMPARE scratch, 04
+	       CALL Z, inc_blt_exp4
+	       FETCH scratch, 1f
+	       COMPARE scratch, 05
+	       CALL Z, inc_blt_exp5
+	       FETCH scratch, 1f
+	       ADD scratch, one
+	       STORE scratch, 1f  
+	       COMPARE scratch, 06
+	       CALL Z, reset_exp
+	       RETURN
+
+ inc_blt_exp1: FETCH scratch, 00
+	       FETCH bullet, 01
+	       LOAD loopvar, 04
+	       LOAD missile, 03
+	       CALL draw_explosion  
+	       RETURN     
+
+ inc_blt_exp2: FETCH scratch, 00
+	       FETCH bullet, 01
+	       LOAD loopvar, 08
+	       LOAD missile, 07
+	       CALL draw_explosion 
+	       RETURN 
+
+ inc_blt_exp3: FETCH scratch, 00
+	       FETCH bullet, 01
+	       LOAD loopvar, 0a
+	       LOAD missile, 08
+	       CALL draw_explosion  
+	       RETURN
+
+ inc_blt_exp4: FETCH scratch, 00
+	       FETCH bullet, 01
+	       LOAD loopvar, 0a
+	       LOAD missile, 08
+	       CALL draw_explosion  
+	       RETURN     
+
+ inc_blt_exp5: FETCH scratch, 00
+	       FETCH bullet, 01
+	       LOAD loopvar, 09
+	       LOAD missile, 07
+	       CALL draw_explosion 
+	       RETURN 
+
+    reset_exp: LOAD scratch, zero
+	       STORE scratch, 00
+	       STORE scratch, 01
+	       STORE scratch, 02
+	       STORE scratch, 03
+	       STORE scratch, 04
+	       STORE scratch, 05
+	       STORE scratch, 1f
+	       RETURN   
+
+
+check_bullets: FETCH scratch, 0f
+	       COMPARE scratch, zero
+	       JUMP Z, exit
+	       JUMP NZ, shoot_bull
+   end_bullet: RETURN
+
+   shoot_bull: LOAD scratch, gs_cursx		; store topright x		
+	       ADD scratch, 08
+	       STORE scratch, 02
+	       LOAD scratch, gs_cursy		; store topright y
+	       SUB scratch, 0a
+	       STORE scratch, 03
+	       LOAD scratch, gs_cursx		; store botleft x
+	       SUB scratch, 08
+	       STORE scratch, 02
+	       LOAD scratch, gs_cursy		; store botleft y
+	       ADD scratch, 0a
+	       STORE scratch, 03
+	       FETCH scratch, 0f		; dec. number of bullets
+	       SUB scratch, one
+	       STORE scratch, 0f
+	       STORE gs_cursx, 00		; store bullet position
+	       STORE gs_cursy, 01		; for detonate
+	       LOAD bullet, zero
+	       STORE bullet, 0e			; reset timer for btn delay
+	       LOAD bullet, one
+	       STORE bullet, 1f
+	       LOAD scratch, gs_cursx
+	       SUB scratch, 7f
+	       JUMP C, left_bullet
+	       JUMP NC, right_bullet
+	       RETURN	       
+
+  left_bullet: LOAD scratch, gs_cursy 
+               SR0 scratch
+	       SUB scratch, 3f
+	       JUMP C, top_bull1
+	       JUMP NC, bot_bull1
+	       RETURN	       
+
+ right_bullet: LOAD scratch, gs_cursy
+               SR0 scratch
+	       SUB scratch, 3f
+	       JUMP C, top_bull2
+	       JUMP NC, bot_bull2
+	       RETURN	
+
+
+draw_explosion: LOAD xpos, scratch
+	       LOAD ypos, bullet
+	       ADD xpos, missile
+	       CALL moveto
+	       ADD ypos, loopvar
+	       CALL drawto       	       
+	       SUB xpos, missile
+	       SUB xpos, missile
+	       CALL drawto
+	       SUB ypos, loopvar
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, missile
+	       ADD xpos, missile
+	       CALL drawto    
+	       ADD ypos, loopvar
+	       CALL drawto      
+
+
+;;======================= MISSILE BLOCK ===============================
+  
+  upd_missile: COMPARE timer, 00		; add timer every 1s
+	       CALL Z, inc_time
+	       RETURN C
+	       FETCH scratch, 94			; launch missile 1
+	       COMPARE scratch, one	
+	       CALL Z, gen_missile
+	       CALL NZ, upd_new_pos
+	       FETCH missile, 95			; launch missile 2
+	       COMPARE missile, one	
+	       CALL Z, gen_missile2
+	       CALL NZ, upd_new_pos2
+	       FETCH missile, 96			; launch missile 3
+	       COMPARE missile, one	
+	       CALL Z, gen_missile3
+	       CALL NZ, upd_new_pos3
+	       FETCH missile, 97			; launch missile 4
+	       COMPARE missile, one	
+	       CALL Z, gen_missile4
+	       CALL NZ, upd_new_pos4
+	       FETCH missile, 98			; launch missile 5
+	       COMPARE missile, one	
+	       CALL Z, gen_missile5
+	       CALL NZ, upd_new_pos5
+	       FETCH missile, 99			; launch missile 6
+	       COMPARE missile, one	
+	       CALL Z, gen_missile6
+	       CALL NZ, upd_new_pos6
+	       FETCH missile, 9a			; launch missile 7
+	       COMPARE missile, one	
+	       CALL Z, gen_missile7
+	       CALL NZ, upd_new_pos7
+
+  return_miss: RETURN
+	      
+     inc_time: FETCH scratch, 5f		; record game time (sec)
+	       ADD scratch, one
+	       STORE scratch, 5f	       
+	       RETURN
+
+draw_round_mis: ADD xpos, 01
+	       CALL drawto
+	       ADD ypos, 01
+	       CALL drawto
+	       ADD ypos, 01
+	       SUB xpos, 01
+	       CALL drawto
+	       SUB ypos, 01
+	       SUB xpos, one
+	       CALL drawto
+	       SUB ypos, 01
+	       CALL drawto
+	       ADD xpos, 01
+	       CALL drawto
+	       RETURN
+
+
+
+
+
+  gen_missile: CALL gen_random		; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP Z, missile_1
+	       JUMP return_miss		
+	       RETURN
+
+
+  upd_new_pos: FETCH missile, 21		; CHECK missile at bottom?
+	       FETCH scratch, 23
+	       SUB missile, f8
+	       SUBCY scratch, f8
+	       CALL NC, dest_mis1
+
+	       FETCH scratch, 20		; CHECK missile at right?
+	       SUB scratch, fc			; destroy it if so
+	       CALL NC, dest_mis1
+	       
+	       FETCH scratch, 20		
+	       SUB scratch, 04			; CHECK missile at left?		
+	       CALL C, dest_mis1		; destroy it if so
+
+	       FETCH scratch, 20		; ###############
+	       FETCH bullet, 21
+	       FETCH loopvar, 22
+	       FETCH missile, 23
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis1
+
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos
+	       RETURN
+	             
+    missile_1: LOAD bullet, zero
+	       STORE bullet, 94			; missile_1 = 0 (being used)
+	       FETCH missile, 20                ; stax
+	       FETCH scratch, 21		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit		; if starting, then call this 	
+	       JUMP NZ, dest_mis1
+	       RETURN
+
+  store_posit: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 20		; missile holds stax
+	       STORE scratch, 21		; scratch holds stay
+	       CALL get_dxdy
+	       CALL draw_missile
+	       RETURN
+	       
+     get_dxdy: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 03
+	       STORE missile, 81		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random1
+	       ADD scratch, missile
+	       STORE missile, 80
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a0
+upd_direction: FETCH missile, a0
+	       COMPARE missile, one
+  	       JUMP Z, dx_right  
+  	       JUMP NZ, dx_left
+	       RETURN
+
+      dx_left: FETCH scratch, 80		; get dx		
+	       FETCH missile, 20		; get stax
+	       FETCH loopvar, 21		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 22
+	       FETCH scratch, 81		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 23			
+	       RETURN
+
+
+     dx_right: FETCH scratch, 80		; get dx
+	       FETCH missile, 20		; get stax
+	       FETCH loopvar, 21		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 22
+	       FETCH scratch, 81		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 23
+	       RETURN
+
+      upd_pos: FETCH missile, 22
+	       FETCH scratch, 23
+	       STORE missile, 20		; stax old takes stax new
+	       STORE scratch, 21		; stax old takes stax new
+	       CALL upd_direction
+	       FETCH scratch, 21
+	       COMPARE scratch, zero		        	
+	       CALL NZ, draw_missile
+	       RETURN
+	       
+ draw_missile: FETCH xpos, 20   
+	       FETCH ypos, 21
+	       CALL moveto
+ 	       FETCH xpos, 22   
+	       FETCH ypos, 23
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis1: LOAD scratch, one
+	       STORE scratch, 94	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 20	   	; reset stax		
+	       STORE scratch, 21	   	; reset stay
+	       STORE scratch, 22	   	; reset endx
+	       STORE scratch, 23	   	; reset endy
+	       STORE scratch, a0		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+	       
+;; MISSILE #2 ===================================================================
+
+
+ 
+ gen_missile2: FETCH scratch, 5f
+	       SUB scratch, 0a
+	       JUMP C, return_miss
+	       CALL gen_random		; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP C, missile_2
+	       JUMP return_miss	
+	       RETURN
+
+
+ upd_new_pos2: FETCH missile, 25		; CHECK missile at bottom?
+	       FETCH scratch, 27
+	       SUB missile, f8
+	       SUBCY scratch, f8
+	       CALL NC, dest_mis2
+	
+	       FETCH scratch, 24		; CHECK missile at right?
+	       SUB scratch, fc			; destroy it if so
+	       CALL NC, dest_mis2
+
+	       FETCH scratch, 24		
+	       SUB scratch, 04			; CHECK missile at left?		
+	       CALL C, dest_mis2		; destroy it if so
+
+	       FETCH scratch, 24		; ###############
+	       FETCH bullet, 25
+	       FETCH loopvar, 26
+	       FETCH missile, 27
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis2
+
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos2
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos2
+	       RETURN
+	             
+    missile_2: LOAD bullet, zero
+	       STORE bullet, 95			; missile_2 = 0 (being used)
+	       FETCH missile, 24                ; stax
+	       FETCH scratch, 25		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit2		; if starting, then call this 	
+	       JUMP NZ, dest_mis2
+	       RETURN
+
+ store_posit2: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 24		; missile holds stax
+	       STORE scratch, 25		; scratch holds stay
+	       CALL get_dxdy2
+	       CALL draw_missile2
+	       RETURN
+	       
+    get_dxdy2: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 03
+	       STORE missile, 83		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random1
+	       ADD scratch, missile
+	       STORE scratch, 82
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a1
+upd_direction2: FETCH missile, a1
+	       COMPARE missile, one
+  	       JUMP Z, dx_right2 
+  	       JUMP NZ, dx_left2 
+
+     dx_left2: FETCH scratch, 82		; get dx		
+	       FETCH missile, 24		; get stax
+	       FETCH loopvar, 25		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 26
+	       FETCH scratch, 83		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 27
+	       RETURN
+
+    dx_right2: FETCH scratch, 82		; get dx
+	       FETCH missile, 24		; get stax
+	       FETCH loopvar, 25		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 26
+	       FETCH scratch, 83		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 27
+	       RETURN
+
+     upd_pos2: FETCH missile, 26
+	       FETCH scratch, 27
+	       STORE missile, 24		; stax old takes stax new
+	       STORE scratch, 25		; stax old takes stax new
+	       CALL upd_direction2
+	       FETCH scratch, 25
+	       COMPARE scratch, zero		        	
+	       CALL NZ, draw_missile2
+	       RETURN
+	       
+draw_missile2: FETCH xpos, 24   
+	       FETCH ypos, 25
+	       CALL moveto
+ 	       FETCH xpos, 26   
+	       FETCH ypos, 27
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis2: LOAD scratch, one
+	       STORE scratch, 95	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 24	   	; reset stax		
+	       STORE scratch, 25	   	; reset stay
+	       STORE scratch, 26	   	; reset endx
+	       STORE scratch, 27	   	; reset endy
+	       STORE scratch, a1		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+
+
+;; MISSILE #3 ===================================================================
+
+
+ 
+ gen_missile3: FETCH scratch, 5f
+	       SUB scratch, 14
+	       JUMP C, return_miss
+	       CALL gen_random		; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP C, missile_3
+	       JUMP return_miss	
+	       RETURN
+
+
+ upd_new_pos3: FETCH missile, 29		; CHECK missile at bottom?
+	       FETCH scratch, 2b
+	       SUB missile, f8	
+	       SUBCY scratch, f8		
+	       CALL NC, dest_mis3
+
+	       FETCH scratch, 28		; CHECK missile at right?
+	       SUB scratch, fc			; destroy it if so
+	       CALL NC, dest_mis3
+ 
+	       FETCH scratch, 28		
+	       SUB scratch, 04			; CHECK missile at left?		
+	       CALL C, dest_mis3		; destroy it if so
+
+	       FETCH scratch, 28		; ###############
+	       FETCH bullet, 29
+	       FETCH loopvar, 2a
+	       FETCH missile, 2b
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis3
+	
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos3
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos3
+	       RETURN
+	             
+    missile_3: LOAD bullet, zero
+	       STORE bullet, 96			; missile_2 = 0 (being used)
+	       FETCH missile, 28                ; stax
+	       FETCH scratch, 29		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit3		; if starting, then call this 	
+	       JUMP NZ, dest_mis3
+	       RETURN
+
+ store_posit3: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 28		; missile holds stax
+	       STORE scratch, 29		; scratch holds stay
+	       CALL get_dxdy3
+	       CALL draw_missile3
+	       RETURN
+	       
+    get_dxdy3: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 04
+	       STORE missile, 85		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random1
+	       ADD scratch, missile
+	       STORE scratch, 84
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a2
+upd_direction3: FETCH missile, a2
+	       COMPARE missile, one
+  	       JUMP Z, dx_right3 
+  	       JUMP NZ, dx_left3 
+
+     dx_left3: FETCH scratch, 84		; get dx		;;; ###### not working
+	       FETCH missile, 28		; get stax
+	       FETCH loopvar, 29		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 2a
+	       FETCH scratch, 85		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 2b
+	       RETURN
+
+
+
+    dx_right3: FETCH scratch, 84		; get dx
+	       FETCH missile, 28		; get stax
+	       FETCH loopvar, 29		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 2a
+	       FETCH scratch, 85		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 2b
+	       RETURN
+
+     upd_pos3: FETCH missile, 2a
+	       FETCH scratch, 2b
+	       STORE missile, 28		; stax old takes stax new
+	       STORE scratch, 29		; stax old takes stax new
+	       CALL upd_direction3	
+	       FETCH scratch, 29
+	       COMPARE scratch, zero	        	
+	       CALL NZ, draw_missile3
+	       RETURN
+	       
+draw_missile3: FETCH xpos, 28   
+	       FETCH ypos, 29
+	       CALL moveto
+ 	       FETCH xpos, 2a   
+	       FETCH ypos, 2b
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis3: LOAD scratch, one
+	       STORE scratch, 96	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 28	   	; reset stax		
+	       STORE scratch, 29	   	; reset stay
+	       STORE scratch, 2a	   	; reset endx
+	       STORE scratch, 2b	   	; reset endy
+	       STORE scratch, a2		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+
+;; MISSILE #4 ===================================================================
+
+
+ 
+ gen_missile4: FETCH scratch, 5f
+	       SUB scratch, 1e
+	       JUMP C, return_miss
+	       CALL gen_random			; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP C, missile_4
+	       JUMP return_miss	
+	       RETURN
+
+
+ upd_new_pos4: FETCH missile, 2d		; CHECK missile at bottom?
+	       FETCH scratch, 2f
+	       SUB missile, f8	
+	       SUBCY scratch, f8	
+	       CALL NC, dest_mis4
+
+	       FETCH scratch, 2c		; CHECK missile at right?
+	       SUB scratch, fc			; destroy it if so
+	       CALL NC, dest_mis4
+ 
+	       FETCH scratch, 2c		
+	       SUB scratch, 04			; CHECK missile at left?		
+	       CALL C, dest_mis4		; destroy it if so
+
+	       FETCH scratch, 2c		; ###############
+	       FETCH bullet, 2d
+	       FETCH loopvar, 2e
+	       FETCH missile, 2f
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis4
+
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos4
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos4
+	       RETURN
+	             
+    missile_4: LOAD bullet, zero
+	       STORE bullet, 97			; missile_2 = 0 (being used)
+	       FETCH missile, 2c                ; stax
+	       FETCH scratch, 2d		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit4		; if starting, then call this 	
+	       JUMP NZ, dest_mis4
+	       RETURN
+
+ store_posit4: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 2c		; missile holds stax
+	       STORE scratch, 2d		; scratch holds stay
+	       CALL get_dxdy4
+	       CALL draw_missile4
+	       RETURN
+	       
+    get_dxdy4: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 04
+	       STORE missile, 87		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random1
+	       ADD scratch, missile
+	       STORE scratch, 86
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a3
+upd_direction4: LOAD missile, a3
+	       COMPARE missile, one
+  	       JUMP Z, dx_right4 
+  	       JUMP NZ, dx_left4 
+
+     dx_left4: FETCH scratch, 86		; get dx		;;; ###### not working
+	       FETCH missile, 2c		; get stax
+	       FETCH loopvar, 2d		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 2e
+	       FETCH scratch, 87		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 2f
+	       RETURN
+
+
+
+    dx_right4: FETCH scratch, 86		; get dx
+	       FETCH missile, 2c		; get stax
+	       FETCH loopvar, 2d		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 2e
+	       FETCH scratch, 87		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 2f
+	       RETURN
+
+     upd_pos4: FETCH missile, 2e
+	       FETCH scratch, 2f
+	       STORE missile, 2c		; stax old takes stax new
+	       STORE scratch, 2d		; stax old takes stax new
+	       CALL upd_direction4
+	       FETCH scratch, 32
+	       COMPARE scratch, zero		        	
+	       CALL NZ, draw_missile4
+	       RETURN
+	       
+draw_missile4: FETCH xpos, 2c   
+	       FETCH ypos, 2d
+	       CALL moveto
+ 	       FETCH xpos, 2e   
+	       FETCH ypos, 2f
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis4: LOAD scratch, one
+	       STORE scratch, 97	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 2c	   	; reset stax		
+	       STORE scratch, 2d	   	; reset stay
+	       STORE scratch, 2e	   	; reset endx
+	       STORE scratch, 2f	   	; reset endy
+	       STORE scratch, a3		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+
+;; MISSILE #5 ===================================================================
+
+
+ 
+ gen_missile5: FETCH scratch, 5f
+	       SUB scratch, 28
+	       JUMP C, return_miss
+	       CALL gen_random		; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP C, missile_5
+	       JUMP return_miss	
+	       RETURN
+
+
+ upd_new_pos5: FETCH missile, 31		; CHECK missile at bottom?
+	       FETCH scratch, 33		; destroy it if so
+	       SUB missile, f8
+	       SUBCY missile, f8		
+	       CALL NC, dest_mis5
+	      	
+	       FETCH scratch, 30		; CHECK missile at right?
+	       SUB scratch, fc			; destroy it if so
+	       CALL NC, dest_mis5   
+    
+	       FETCH scratch, 30		
+	       SUB scratch, 04			; CHECK missile at left?		
+	       CALL C, dest_mis5		; destroy it if so
+
+	       FETCH scratch, 30		; ###############
+	       FETCH bullet, 31
+	       FETCH loopvar, 32
+	       FETCH missile, 33
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis5
+	
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos5
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos5
+	       RETURN
+	             
+    missile_5: LOAD bullet, zero
+	       STORE bullet, 98			; missile_2 = 0 (being used)
+	       FETCH missile, 30                ; stax
+	       FETCH scratch, 31		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit5		; if starting, then call this 	
+	       JUMP NZ, dest_mis5
+	       RETURN
+
+ store_posit5: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 30		; missile holds stax
+	       STORE scratch, 31		; scratch holds stay
+	       CALL get_dxdy5
+	       CALL draw_missile5
+	       RETURN
+	       
+    get_dxdy5: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 05
+	       STORE missile, 89		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random1
+	       ADD scratch, missile
+	       STORE scratch, 88
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a4
+upd_direction5: FETCH missile, a4
+	       COMPARE missile, one
+  	       JUMP Z, dx_right5
+	       JUMP NZ, dx_left5
+	       RETURN
+ 
+     dx_left5: FETCH scratch, 88		; get dx		;;; ###### not working
+	       FETCH missile, 30		; get stax
+	       FETCH loopvar, 31		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 32
+	       FETCH scratch, 89		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 33
+	       RETURN
+
+
+
+    dx_right5: FETCH scratch, 88		; get dx
+	       FETCH missile, 30		; get stax
+	       FETCH loopvar, 31		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 32
+	       FETCH scratch, 89		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 33
+	       RETURN
+
+     upd_pos5: FETCH missile, 32
+	       FETCH scratch, 33
+	       STORE missile, 30		; stax old takes stax new
+	       STORE scratch, 31		; stax old takes stax new
+	       CALL upd_direction5
+	       FETCH scratch, 31
+	       COMPARE scratch, zero		        	
+	       CALL NZ, draw_missile5
+	       RETURN
+	       
+draw_missile5: FETCH xpos, 30   
+	       FETCH ypos, 31
+	       CALL moveto
+ 	       FETCH xpos, 32   
+	       FETCH ypos, 33
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis5: LOAD scratch, one
+	       STORE scratch, 98	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 30	   	; reset stax		
+	       STORE scratch, 31	   	; reset stay
+	       STORE scratch, 32	   	; reset endx
+	       STORE scratch, 33	   	; reset endy
+	       STORE scratch, a4		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+
+;; MISSILE #6 ===================================================================
+
+
+ gen_missile6: FETCH scratch, 5f
+	       SUB scratch, 32
+	       JUMP C, return_miss
+	       CALL gen_random		; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP C, missile_6
+	       JUMP return_miss	
+	       RETURN
+
+
+ upd_new_pos6: FETCH missile, 35		; CHECK missile at bottom?
+	       FETCH scratch, 37		; destroy it if so
+	       SUB missile, f8			
+	       SUBCY scratch, f8	
+	       CALL NC, dest_mis6
+
+	       FETCH missile, 34
+	       SUB missile, fc		
+	       CALL NC, dest_mis6
+
+	       FETCH missile, 34
+	       SUB missile, 04		
+	       CALL C, dest_mis6
+
+	       FETCH scratch, 34		; ###############
+	       FETCH bullet, 35
+	       FETCH loopvar, 36
+	       FETCH missile, 37
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis6
+   		
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos6
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos6
+	       RETURN
+	             
+    missile_6: LOAD bullet, zero
+	       STORE bullet, 99			; missile_2 = 0 (being used)
+	       FETCH missile, 34                ; stax
+	       FETCH scratch, 35		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit6		; if starting, then call this 	
+	       JUMP NZ, dest_mis6
+	       RETURN
+
+ store_posit6: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 34		; missile holds stax
+	       STORE scratch, 35		; scratch holds stay
+	       CALL get_dxdy6
+	       CALL draw_missile6
+	       RETURN
+	       
+    get_dxdy6: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 05
+	       STORE missile, 8b		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random1
+	       ADD scratch, missile
+	       STORE scratch, 8a
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a5
+upd_direction6: FETCH missile, a5
+	       COMPARE missile, one
+  	       JUMP Z, dx_right6
+	       JUMP NZ, dx_left6
+	       RETURN
+ 
+     dx_left6: FETCH scratch, 8a		; get dx		;;; ###### not working
+	       FETCH missile, 34		; get stax
+	       FETCH loopvar, 35		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 36
+	       FETCH scratch, 8b		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 37
+	       RETURN
+
+
+
+    dx_right6: FETCH scratch, 8a		; get dx
+	       FETCH missile, 34		; get stax
+	       FETCH loopvar, 35		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 36
+	       FETCH scratch, 8b		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 37
+	       RETURN
+
+     upd_pos6: FETCH missile, 36
+	       FETCH scratch, 37
+	       STORE missile, 34		; stax old takes stax new
+	       STORE scratch, 35		; stax old takes stax new
+	       CALL upd_direction6
+	       FETCH scratch, 35
+	       COMPARE scratch, zero		        	
+	       CALL NZ, draw_missile6
+	       RETURN
+	       
+draw_missile6: FETCH xpos, 34   
+	       FETCH ypos, 35
+	       CALL moveto
+ 	       FETCH xpos, 36   
+	       FETCH ypos, 37
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis6: LOAD scratch, one
+	       STORE scratch, 99	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 34	   	; reset stax		
+	       STORE scratch, 35	   	; reset stay
+	       STORE scratch, 36	   	; reset endx
+	       STORE scratch, 37	   	; reset endy
+	       STORE scratch, a5		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+
+;; MISSILE #7 ===================================================================
+
+
+ gen_missile7: FETCH scratch, 5f
+	       SUB scratch, 3c
+	       JUMP C, return_miss
+	       CALL gen_random		; create random time for missile
+	       COMPARE missile, 02		; to launch
+	       JUMP C, missile_7
+	       JUMP return_miss	
+	       RETURN
+
+
+ upd_new_pos7: FETCH missile, 39		; CHECK missile at bottom?
+	       FETCH scratch, 3b
+	       SUB missile, f8			; destroy it if so
+	       SUB scratch, f8		
+	       CALL NC, dest_mis7
+	
+	       FETCH scratch, 38		; CHECK missile at right?	
+	       SUB scratch, fc			; destroy it if so
+	       CALL NC, dest_mis7
+	       
+	       FETCH scratch, 38		
+	       COMPARE scratch, 04		; CHECK missile at left?		
+	       CALL C, dest_mis7		; destroy it if so
+
+	       FETCH scratch, 38		; ###############
+	       FETCH bullet, 39
+	       FETCH loopvar, 3a
+	       FETCH missile, 3b
+	       CALL check_mis_bull
+	       COMPARE scratch, one
+	       CALL Z, dest_mis7
+
+	       COMPARE timer, 00
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 04
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 08
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 0c
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 10
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 14
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 18
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 1c
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 20
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 24
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 28
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 2c
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 30
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 34
+	       JUMP Z, upd_pos7
+	       COMPARE timer, 38
+	       JUMP Z, upd_pos7
+	       RETURN
+	             
+    missile_7: LOAD bullet, zero
+	       STORE bullet, 9a			; missile_2 = 0 (being used)
+	       FETCH missile, 38                ; stax
+	       FETCH scratch, 39		; stay
+	       COMPARE scratch, zero
+	       JUMP Z, store_posit7		; if starting, then call this 	
+	       JUMP NZ, dest_mis7
+	       RETURN
+
+ store_posit7: CALL gen_random			; random value 'missile' for starx
+	       LOAD scratch, zero		; and zero value 'scratch' for stay
+	       STORE missile, 38		; missile holds stax
+	       STORE scratch, 39		; scratch holds stay
+	       CALL get_dxdy7
+	       CALL draw_missile7
+	       RETURN
+	       
+    get_dxdy7: CALL gen_random4			; this will give endx, endy
+	       SR0 missile
+	       ADD missile, 05
+	       STORE missile, 8d		; dx, dy, and 0xa0 (direction)
+	       CALL gen_random1
+	       LOAD scratch, missile
+	       CALL gen_random4
+	       SR0 missile
+	       ADD scratch, missile
+	       STORE scratch, 8c
+	       CALL gen_random1			; get direction (L or R)
+	       STORE scratch, a6
+upd_direction7: FETCH missile, a6
+	       COMPARE missile, one
+  	       JUMP Z, dx_right7
+	       JUMP NZ, dx_left7
+	       RETURN
+ 
+     dx_left7: FETCH scratch, 8c		; get dx		;;; ###### not working
+	       FETCH missile, 38		; get stax
+	       FETCH loopvar, 39		; get stay
+ 	       SUB missile, scratch
+	       STORE missile, 3a
+	       FETCH scratch, 8d		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 3b
+	       RETURN
+
+
+
+    dx_right7: FETCH scratch, 8c		; get dx
+	       FETCH missile, 38		; get stax
+	       FETCH loopvar, 39		; get stay
+ 	       ADD missile, scratch
+	       STORE missile, 3a
+	       FETCH scratch, 8d		; get dy
+	       ADD loopvar, scratch
+	       STORE loopvar, 3b
+	       RETURN
+
+     upd_pos7: FETCH missile, 3a
+	       FETCH scratch, 3b
+	       STORE missile, 38		; stax old takes stax new
+	       STORE scratch, 39		; stax old takes stax new
+	       CALL upd_direction7
+	       FETCH scratch, 39
+	       COMPARE scratch, zero	        	
+	       CALL NZ, draw_missile7
+	       RETURN
+	       
+draw_missile7: FETCH xpos, 38   
+	       FETCH ypos, 39
+	       CALL moveto
+ 	       FETCH xpos, 3a   
+	       FETCH ypos, 3b
+	       CALL drawto
+	       CALL draw_round_mis
+	       RETURN
+
+    dest_mis7: LOAD scratch, one
+	       STORE scratch, 9a	   	; reset missile 1
+	       LOAD scratch, zero
+	       STORE scratch, 38	   	; reset stax		
+	       STORE scratch, 39	   	; reset stay
+	       STORE scratch, 3a	   	; reset endx
+	       STORE scratch, 3b	   	; reset endy
+	       STORE scratch, a6		; reset direction
+ 	       JUMP return_miss
+	       RETURN
+
+
+
+
+
+;;================= BULLET-MISSILE INTERACTION BLOCK =========================
+
+draw_gs_debug: FETCH scratch, 02; topleft x
+ 	       OUTPUT scratch, qssd_hi           ; debug display on leds
+
+	       FETCH bullet, 03; topleft y
+               OUTPUT bullet, qssd_lo            ; debug display on leds
+               RETURN                              ; return
+
+check_mis_bull: FETCH canon, 02			; check x position first
+	       FETCH bullet_d, 04
+	       COMPARE scratch, canon
+	       JUMP NC, exit_upd
+	       COMPARE scratch, bullet_d
+	       JUMP C, exit_upd
+ 	       FETCH canon, 03			; check y position 
+	       FETCH bullet_d, 05
+	       COMPARE bullet, bullet_d
+	       JUMP NC, exit_upd
+	       COMPARE bullet, canon
+	       JUMP C, exit_upd
+	       LOAD scratch, one
+	       RETURN 
+
+     exit_upd: LOAD scratch, zero
+	       RETURN
+	       
+	       
+	       
+;;================== BASE-MISSILE INTERACTION BLOCK ==========================
+	       
+       
+	       
+	       
+	       
+	       
+	       
+	       	       	       
+;;============================================================================
+;; Subroutine: draw_gs
+;; This uses the current game state as input, and draws it on the display.
+;; This subroutine calls an example of how to output debug or diagnostic info
+;; using the leds.  The call to the draw_gs_debug routine (and draw_gs_debug
+;; routine itself) can be entirely remove as it is required to play the game.
+;;============================================================================
+
+      draw_gs: CALL draw_gs_debug                  ; for debug info display
+               COMPARE gs_major, gs_major_attrone  ; are we in attrone?
+               JUMP Z, draw_attrone                ; do drawing for attrone
+               COMPARE gs_major, gs_major_attrtwo  ; are we in attrtwo?
+               JUMP Z, draw_attrtwo                ; do drawing for attrtwo
+               COMPARE gs_major, gs_major_playing  ; are we in playing?
+               JUMP Z, draw_playing                ; do drawing for playing
+               COMPARE gs_major, gs_major_gameend  ; are we in gameend?
+               JUMP Z, draw_gameend                ; do drawing for gameend
+               RETURN                              ; return
+
+
+ draw_attrone: LOAD xpos, 3f ; M
+	       LOAD ypos, 81
+	       CALL moveto
+	       LOAD xpos, 3f
+	       LOAD ypos, 78
+	       CALL drawto
+	       LOAD xpos, 43
+	       LOAD ypos, 81
+	       CALL drawto
+	       LOAD xpos, 47
+	       LOAD ypos, 78
+	       CALL drawto
+	       LOAD xpos, 47
+	       LOAD ypos, 81
+	       CALL drawto
+
+	       LOAD xpos, 4b ; I
+	       LOAD ypos, 78
+	       CALL moveto
+	       LOAD xpos, 4b
+	       LOAD ypos, 81
+	       CALL drawto
+               RETURN
+
+ draw_attrtwo: RETURN 
+
+ draw_playing: LOAD xpos, gs_cursx       		; cursor 1
+               ADD xpos, one
+               LOAD ypos, gs_cursy
+               CALL moveto
+               LOAD xpos, gs_cursx     
+               ADD xpos, gs_curs_dim 
+               LOAD ypos, gs_cursy
+               CALL drawto
+ 
+	       LOAD xpos, gs_cursx  			; cursor 2     
+               LOAD ypos, gs_cursy
+               ADD ypos, one
+               CALL moveto
+               LOAD xpos, gs_cursx     
+               LOAD ypos, gs_cursy
+               ADD ypos, gs_curs_dim 
+               CALL drawto
+               
+       	       LOAD xpos, gs_cursx    			; cursor 3   
+               SUB xpos, one
+               LOAD ypos, gs_cursy
+               CALL moveto
+               LOAD xpos, gs_cursx     
+               SUB xpos, gs_curs_dim 
+               LOAD ypos, gs_cursy
+               CALL drawto
+               
+               LOAD xpos, gs_cursx     			; cursor 4  
+               LOAD ypos, gs_cursy
+               SUB ypos, one
+               CALL moveto
+               LOAD xpos, gs_cursx     
+               LOAD ypos, gs_cursy
+               SUB ypos, gs_curs_dim 
+               CALL drawto
+               
+   draw_base1: FETCH xpos, 61				; base 1
+	       FETCH ypos, 62
+               CALL moveto
+               SUB ypos, 13
+	       CALL drawto
+	       ADD xpos, 04
+               ADD ypos, 04
+	       CALL drawto
+               ADD ypos, 08
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 12
+	       CALL drawto
+               ADD xpos, 04
+	       CALL drawto
+               ADD ypos, 13
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 03
+	       CALL drawto
+	       ADD xpos, 04
+               SUB ypos, 04
+	       CALL drawto
+               ADD ypos, 09
+	       CALL drawto     
+               
+
+   draw_base2: FETCH xpos, 64				; base 2
+	       FETCH ypos, 65
+               CALL moveto
+               SUB ypos, 13
+	       CALL drawto
+	       ADD xpos, 04
+               ADD ypos, 04
+	       CALL drawto
+               ADD ypos, 08
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 12
+	       CALL drawto
+               ADD xpos, 04
+	       CALL drawto
+               ADD ypos, 13
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 03
+	       CALL drawto
+	       ADD xpos, 04
+               SUB ypos, 04
+	       CALL drawto
+               ADD ypos, 09
+	       CALL drawto
+
+   draw_base3: FETCH xpos, 67				; base 3
+	       FETCH ypos, 68
+               CALL moveto
+                SUB ypos, 13
+	       CALL drawto
+	       ADD xpos, 04
+               ADD ypos, 04
+	       CALL drawto
+               ADD ypos, 08
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 12
+	       CALL drawto
+               ADD xpos, 04
+	       CALL drawto
+               ADD ypos, 13
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 03
+	       CALL drawto
+	       ADD xpos, 04
+               SUB ypos, 04
+	       CALL drawto
+               ADD ypos, 09
+	       CALL drawto
+
+   draw_base4: FETCH xpos, 6a				; base 4
+	       FETCH ypos, 6b
+               CALL moveto
+               SUB ypos, 13
+	       CALL drawto
+	       ADD xpos, 04
+               ADD ypos, 04
+	       CALL drawto
+               ADD ypos, 08
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 12
+	       CALL drawto
+               ADD xpos, 04
+	       CALL drawto
+               ADD ypos, 13
+	       CALL drawto
+               ADD xpos, 02
+	       CALL drawto
+               SUB ypos, 03
+	       CALL drawto
+	       ADD xpos, 04
+               SUB ypos, 04
+	       CALL drawto
+               ADD ypos, 09
+	       CALL drawto
+	       RETURN
+
+  draw_canon_1: LOAD xpos, zero
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 0f ;03
+	       LOAD ypos, ec ;f8
+	       CALL drawto
+
+	       LOAD xpos, 03
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 12;new
+	       LOAD ypos, ec ;new
+	       CALL drawto
+
+               LOAD xpos, ff
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, ed;f9
+	       LOAD ypos, ed;f9
+	       CALL drawto
+
+               LOAD xpos, fc
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, ea;f9
+	       LOAD ypos, ed;f9
+	       CALL drawto
+
+	       RETURN	       
+
+ draw_canon_2: LOAD xpos, zero
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 12;06
+	       LOAD ypos, ed;f9
+	       CALL drawto
+
+               LOAD xpos, 03
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 15;06
+	       LOAD ypos, ed;f9
+	       CALL drawto
+
+	       LOAD xpos, ff
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, f6;fc
+	       LOAD ypos, ec;f8
+	       CALL drawto
+
+               LOAD xpos, fc
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, f3;fc
+	       LOAD ypos, ec;f8
+	       CALL drawto
+	       RETURN
+
+ draw_canon_3: LOAD xpos, zero
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 10 ;04
+	       LOAD ypos, ec;f8
+	       CALL drawto
+
+               LOAD xpos, 03
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 13  
+	       LOAD ypos, ec 
+	       CALL drawto
+
+	       LOAD xpos, ff
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, ec; f8
+	       LOAD ypos, f0; fc
+	       CALL drawto
+
+               LOAD xpos, fc
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, e9;f5 
+	       LOAD ypos, f0
+	       CALL drawto
+              
+	       JUMP return
+	       RETURN	       
+
+ draw_canon_4: LOAD xpos, zero
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 13  ; 07
+	       LOAD ypos, ef ;fb
+	       CALL drawto
+
+               LOAD xpos, 03
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 16   
+	       LOAD ypos, ef  
+	       CALL drawto
+
+	       LOAD xpos, ff
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, ec;f8
+	       LOAD ypos, ef;fb
+	       CALL drawto
+
+               LOAD xpos, fc
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, e9
+	       LOAD ypos, ef
+	       CALL drawto
+
+	       JUMP return
+	       RETURN
+
+ draw_canon_5: LOAD xpos, zero
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 13  ;04
+	       LOAD ypos, ec;f8
+	       CALL drawto
+
+               LOAD xpos, 03
+               LOAD ypos, ff
+               CALL moveto
+	       LOAD xpos, 16 
+	       LOAD ypos, ec 
+	       CALL drawto
+
+	       LOAD xpos, ff
+	       LOAD ypos, ff
+               CALL moveto 
+               LOAD xpos, f5 ;fb
+	       LOAD ypos, ec;f8
+	       CALL drawto
+
+               LOAD xpos, fc
+	       LOAD ypos, ff
+               CALL moveto	       
+	       LOAD xpos, f2
+	       LOAD ypos, ec
+	       CALL drawto
+
+
+	       RETURN
+
+
+
+
+	       
+	       
+    bot_bull1: LOAD xpos, zero 
+	       LOAD ypos, ff
+	       CALL moveto   
+	       LOAD scratch, gs_cursx
+	       LOAD bullet, gs_cursy
+	       LOAD loopvar, ff			; making bot right the 
+	       SUB loopvar, bullet		; starting position
+	       SR0 loopvar
+	       SR0 loopvar	               	; y final div. by 4
+	       SR0 scratch 
+	       SR0 scratch			; x final div. by 4
+	       LOAD bullet_d, scratch
+	       ADD xpos, bullet_d	        
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, bullet_d
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, bullet_d
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, bullet_d
+	       SUB ypos, loopvar
+	       CALL drawto
+	       RETURN
+
+    top_bull1: LOAD xpos, zero			; starting from canon
+	       LOAD ypos, ff
+	       CALL moveto   
+	       LOAD scratch, gs_cursx
+	       LOAD bullet, gs_cursy
+	       LOAD loopvar, ff			; making bot right the 
+	       SUB loopvar, bullet		; starting position
+	       SR0 loopvar
+	       SR0 loopvar	               	; y final div. by 4
+	       SR0 scratch 
+	       SR0 scratch			; x final div. by 4
+	       LOAD bullet_d, scratch
+	       ADD xpos, bullet_d	        
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, bullet_d
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, bullet_d
+	       SUB ypos, loopvar
+	       CALL drawto
+	       ADD xpos, bullet_d
+	       SUB ypos, loopvar
+	       CALL drawto
+	       RETURN
+
+
+	       
+    bot_bull2: LOAD xpos, ff 
+	       LOAD ypos, ff
+	       CALL moveto   
+	       LOAD scratch, gs_cursx
+	       LOAD bullet, gs_cursy
+	       LOAD loopvar, ff			; making bot right the 
+	       SUB loopvar, bullet		; starting position
+	       LOAD bullet, ff
+	       SUB bullet, scratch
+	       SR0 loopvar
+	       SR0 loopvar	               	; y final div. by 4
+	       SR0 bullet 
+	       SR0 bullet			; x final div. by 4
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       RETURN
+
+
+    top_bull2: LOAD xpos, ff 			; starting from canon
+	       LOAD ypos, ff
+	       CALL moveto   
+	       LOAD scratch, gs_cursx
+	       LOAD bullet, gs_cursy
+	       LOAD loopvar, ff			; making bot right the 
+	       SUB loopvar, bullet		; starting position
+	       LOAD bullet, ff
+	       SUB bullet, scratch
+	       SR0 loopvar
+	       SR0 loopvar	               	; y final div. by 4
+	       SR0 bullet 
+	       SR0 bullet			; x final div. by 4
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       SUB xpos, bullet
+	       SUB ypos, loopvar
+	       CALL drawto
+	       RETURN
+
+
+
+
+ draw_gameend: LOAD xpos, 48 ; draw letter d
+               LOAD ypos, 50
+               CALL moveto
+               LOAD xpos, 48
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 28
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 28
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 48
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58 ; draw letter o
+               LOAD ypos, 70
+               CALL moveto
+               LOAD xpos, 58
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, 78
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 58
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, 88 ; draw letter n
+               LOAD ypos, 90
+               CALL moveto
+               LOAD xpos, 88
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, a8
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, d8 ; draw letter e
+               LOAD ypos, 90
+               CALL moveto
+               LOAD xpos, b8
+               LOAD ypos, 90
+               CALL drawto
+               LOAD xpos, b8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, d8
+               LOAD ypos, 70
+               CALL drawto
+               LOAD xpos, b8
+               LOAD ypos, 90
+               CALL drawto
+               RETURN
+
+;;============================================================================
+;; Subroutine: moveto and drawto
+;; The moveto routine uses the global variables xpos and ypos, and the drawto
+;; routine uses these global variables as well as the endpoint coordinates in
+;; the display controller.  Moveto simply copies xpos and ypos into endpoint
+;; coordinates in the display controller, it does not draw anything.  The
+;; drawto routine copies endpoint coordinates to startpoint coordinates (does
+;; not matter if the endpoint was from an actual draw, or simply an update
+;; by moveto) and then copies xpos and ypos into endpoint coordinates, then
+;; starts a linedraw.
+;;============================================================================
+
+       moveto: OUTPUT xpos, endx                   ; copy global to hardware
+               OUTPUT ypos, endy                   ; copy global to hardware
+               RETURN                              ; return
+
+       drawto: INPUT scratch, endx                 ; read hardware
+               OUTPUT scratch, stax                ; write hardware
+               OUTPUT xpos, endx                   ; copy global to hardware
+               INPUT scratch, endy                 ; read hardware
+               OUTPUT scratch, stay                ; write hardware
+               OUTPUT ypos, endy                   ; copy global to hardware
+               LOAD scratch, busy_go               ; prepare the command
+               OUTPUT scratch, busy                ; send the command
+               CALL hw_init_wait                   ; wait line draw done
+               RETURN                              ; return
+
+
+
+;;============================================================================
+;; Interrupt - Vector.
+;;============================================================================
+
+               ADDRESS 7FF                         ; must be located here
+   isr_vector: JUMP isr                            ; always jump to isr
+
+;;============================================================================
+;;
+;;============================================================================
